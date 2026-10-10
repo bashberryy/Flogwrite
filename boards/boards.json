@@ -1,0 +1,5 @@
+{
+  "_comment": "Supported boards for FLOGWRITE — grunt only",
+  "_shim_mirror": "https://dl.cros.download/files/{board}/{board}.zip",
+  "grunt": { "name": "Grunt", "family": "grunt", "arch": "x86_64" }
+}
