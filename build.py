@@ -35,10 +35,11 @@ from urllib.request import urlopen, Request
 
 # Paths
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-MENU_PATH    = os.path.join(SCRIPT_DIR, "src", "menu.sh")
-STARTUP_PATH = os.path.join(SCRIPT_DIR, "src", "startup.conf")
-STUB_PATH    = os.path.join(SCRIPT_DIR, "src", "stub.sh")
-BANNER_PATH  = os.path.join(SCRIPT_DIR, "bootloader", "ui", "banner.txt")
+MENU_PATH            = os.path.join(SCRIPT_DIR, "src", "menu.sh")
+STARTUP_PATH         = os.path.join(SCRIPT_DIR, "src", "startup.conf")
+STUB_PATH            = os.path.join(SCRIPT_DIR, "src", "stub.sh")
+FLOGWRITE_SCRIPT_PATH = os.path.join(SCRIPT_DIR, "src", "flogwrite.sh")
+BANNER_PATH          = os.path.join(SCRIPT_DIR, "bootloader", "ui", "banner.txt")
 BOARDS_JSON  = os.path.join(SCRIPT_DIR, "boards", "boards.json")
 DIST_DIR     = os.path.join(SCRIPT_DIR, "dist")
 
@@ -602,7 +603,7 @@ def _pick_slot(fs: Ext2FS, menu_size: int):
 # Rootfs patching
 # ---------------------------------------------------------------------------
 
-def patch_rootfs(img: bytearray, menu: bytes, startup: bytes, banner: bytes, board: str) -> bytearray:
+def patch_rootfs(img: bytearray, menu: bytes, startup: bytes, banner: bytes, flogwrite_script: bytes, board: str) -> bytearray:
     fs = Ext2FS(img)
     slot_path, slot_ino = _pick_slot(fs, len(menu))
     print(f"[build:{board}] menu -> {slot_path} ({fs.cap(slot_ino)} b, {len(menu)} b needed)")
@@ -629,6 +630,22 @@ def patch_rootfs(img: bytearray, menu: bytes, startup: bytes, banner: bytes, boa
     if s_ino and fs.cap(s_ino) >= len(startup):
         fs.write(s_ino, startup)
         print(f"[build:{board}] startup.conf patched")
+
+    fw_ino = fs.find("/usr/share/cros/flogwrite.sh")
+    if fw_ino and fs.cap(fw_ino) >= len(flogwrite_script):
+        fs.write(fw_ino, flogwrite_script)
+        print(f"[build:{board}] flogwrite.sh -> /usr/share/cros/flogwrite.sh")
+    else:
+        print(f"[build:{board}] WARNING: /usr/share/cros/flogwrite.sh not found or too small; trying slot fallback")
+        slots = _scan_shell_slots(fs)
+        candidates = [(cap, path, ino) for cap, path, ino in slots
+                      if cap >= len(flogwrite_script) and path not in _SLOT_BLOCKLIST and path != slot_path]
+        if candidates:
+            fw_slot_path, fw_slot_ino = candidates[0][1], candidates[0][2]
+            fs.write(fw_slot_ino, flogwrite_script)
+            print(f"[build:{board}] WARNING: flogwrite.sh placed in fallback slot {fw_slot_path} — menu path mismatch!")
+        else:
+            raise RuntimeError(f"[build:{board}] No slot available for flogwrite.sh")
 
     return img
 
@@ -704,7 +721,7 @@ def build(board_in: str = TARGET_BOARD, local_zip: Optional[str] = None, allow_f
     if board not in boards_cfg:
         raise RuntimeError(f"[build:{board}] Board not found in boards/boards.json")
 
-    for p in [MENU_PATH, STARTUP_PATH, STUB_PATH, BANNER_PATH]:
+    for p in [MENU_PATH, STARTUP_PATH, STUB_PATH, FLOGWRITE_SCRIPT_PATH, BANNER_PATH]:
         if not os.path.exists(p):
             raise FileNotFoundError(f"[build:{board}] Missing required file: {p}")
 
@@ -746,10 +763,11 @@ def build(board_in: str = TARGET_BOARD, local_zip: Optional[str] = None, allow_f
             img = bytearray(f.read(p3_size))
 
         # patch rootfs
-        with open(MENU_PATH,    "rb") as f: menu    = f.read()
-        with open(STARTUP_PATH, "rb") as f: startup = f.read()
-        with open(BANNER_PATH,  "rb") as f: banner  = f.read()
-        img = patch_rootfs(img, menu, startup, banner, board)
+        with open(MENU_PATH,            "rb") as f: menu            = f.read()
+        with open(STARTUP_PATH,         "rb") as f: startup         = f.read()
+        with open(BANNER_PATH,          "rb") as f: banner          = f.read()
+        with open(FLOGWRITE_SCRIPT_PATH,"rb") as f: flogwrite_script = f.read()
+        img = patch_rootfs(img, menu, startup, banner, flogwrite_script, board)
 
         # write patched ROOT-A back into the shim
         with open(shim_bin, "r+b") as f:
