@@ -1,0 +1,99 @@
+name: Build FLOGWRITE
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: flogwrite-build
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y python3 unzip curl e2fsprogs
+
+      - name: Free disk space
+        run: |
+          sudo rm -rf \
+            /usr/local/lib/android \
+            /opt/ghc \
+            /usr/share/dotnet \
+            /usr/local/share/boost \
+            "$AGENT_TOOLSDIRECTORY" || true
+
+      - name: Cache grunt shim
+        id: cache-shim
+        uses: actions/cache@v4
+        with:
+          path: shim_cache
+          key: shim-grunt-v1
+
+      - name: Restore cached shim
+        if: steps.cache-shim.outputs.cache-hit == 'true'
+        run: |
+          mkdir -p /tmp/flogwrite-shim
+          cp shim_cache/grunt.bin /tmp/flogwrite-shim/grunt.bin
+          echo "FLOGWRITE_LOCAL_SHIM=/tmp/flogwrite-shim/grunt.bin" >> $GITHUB_ENV
+
+      - name: Run build
+        env:
+          GITHUB_ACTIONS: "true"
+        run: |
+          if [ -n "$FLOGWRITE_LOCAL_SHIM" ] && [ -f "$FLOGWRITE_LOCAL_SHIM" ]; then
+            echo "Using cached shim: $FLOGWRITE_LOCAL_SHIM"
+            python3 build.py "$FLOGWRITE_LOCAL_SHIM"
+          else
+            python3 build.py
+            # cache the downloaded shim for next run
+            mkdir -p shim_cache
+            SHIM=$(find /tmp -name "grunt.bin" -size +100M 2>/dev/null | head -1)
+            if [ -n "$SHIM" ]; then
+              cp "$SHIM" shim_cache/grunt.bin
+            fi
+          fi
+
+      - name: Validate output
+        run: |
+          set -e
+          ZIP="dist/flogwrite_grunt.zip"
+
+          if [ ! -s "$ZIP" ]; then
+            echo "Build output not found: $ZIP" >&2
+            exit 1
+          fi
+
+          echo "Archive contents:"
+          unzip -l "$ZIP"
+
+          COUNT=$(unzip -Z1 "$ZIP" | grep -c '\.bin$' || true)
+          if [ "$COUNT" -ne 1 ]; then
+            echo "Expected exactly one .bin file, found $COUNT" >&2
+            exit 1
+          fi
+
+          INNER=$(unzip -Z1 "$ZIP" | grep '\.bin$' | head -n1)
+          EXPECTED="chromeos_flogwrite_grunt.bin"
+          if [ "$INNER" != "$EXPECTED" ]; then
+            echo "Unexpected inner bin name: $INNER" >&2
+            echo "Expected: $EXPECTED" >&2
+            exit 2
+          fi
+
+          echo "Output validated successfully."
+          echo "ZIP size: $(du -h "$ZIP" | cut -f1)"
+          sha256sum "$ZIP"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: flogwrite-grunt
+          path: dist/flogwrite_grunt.zip
+          retention-days: 14
