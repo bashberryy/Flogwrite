@@ -684,17 +684,43 @@ def patch_kernel_version(path: str, board: str) -> None:
     kern_size  = (kern_entry["end"] - kern_entry["start"] + 1) * sector
     with open(path, "rb") as f:
         f.seek(kern_start)
-        kern_blob = bytearray(f.read(min(kern_size, 4096)))
-    if len(kern_blob) < 16:
+        head = f.read(4096)
+
+    if len(head) < 48:
         print(f"[build:{board}] WARNING: KERN-A too small to parse, skipping kernel version patch")
         return
-    keyblock_size = struct.unpack_from("<Q", kern_blob, 8)[0]
-    if keyblock_size < 64 or keyblock_size + 0x28 > len(kern_blob):
-        print(f"[build:{board}] WARNING: keyblock_size {keyblock_size} out of range, skipping kernel version patch")
+
+    VBOOT1_MAGIC = b"CHROMEOS"
+    VBOOT2_MAGIC = b"VBKP"
+
+    if head[:8] == VBOOT1_MAGIC:
+        # vboot1 VbKeyBlockHeader: magic(8) + padding(32) + keyblock_size(8) at offset 40
+        keyblock_size = struct.unpack_from("<Q", head, 40)[0]
+        if keyblock_size < 64 or keyblock_size > 1024 * 1024:
+            print(f"[build:{board}] WARNING: vboot1 keyblock_size {keyblock_size} out of range, skipping kernel version patch")
+            return
+        preamble_off = keyblock_size
+        kernel_version_off = preamble_off + 0x20
+        print(f"[build:{board}] vboot1 keyblock detected, keyblock_size={keyblock_size}")
+    elif head[:4] == VBOOT2_MAGIC:
+        kernel_version_off = 0x10
+        preamble_off = 0
+        print(f"[build:{board}] vboot2 preamble detected (VBKP)")
+    else:
+        hex_head = head[:16].hex()
+        print(f"[build:{board}] WARNING: KERN-A has unknown vboot magic ({hex_head}), skipping kernel version patch")
         return
-    preamble_off       = keyblock_size
-    kernel_version_off = preamble_off + 0x20
-    current_version    = struct.unpack_from("<Q", kern_blob, kernel_version_off)[0]
+
+    read_size = min(max(kernel_version_off + 8, 4096), kern_size)
+    with open(path, "rb") as f:
+        f.seek(kern_start)
+        kern_blob = bytearray(f.read(read_size))
+
+    if kernel_version_off + 8 > len(kern_blob):
+        print(f"[build:{board}] WARNING: could not read full preamble, skipping kernel version patch")
+        return
+
+    current_version = struct.unpack_from("<Q", kern_blob, kernel_version_off)[0]
     if current_version == 1:
         print(f"[build:{board}] KERN-A version already 1, no patch needed")
         return
